@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment Variables / Secrets
+.env
+.env.*
+!.env.example
+
+# Execution logs and temporary data
+logs/
+*.log
+*.jsonl
+
+# Temporary / Debug captures (keep tpl_*.png for templates)
+debug_*.png
+mugen_window.png
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
