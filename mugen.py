@@ -540,60 +540,50 @@ def check_game_status(cv_img: np.ndarray, p1_hp: int, p2_hp: int) -> str:
     ゲーム画面の状態を判定する
     戻り値:
       - 'SELECT': キャラセレクト画面（VERSUS MODE）
-      - 'MENU': タイトル、VS画面など（戦闘外・入力停止）
       - 'FIGHT': FIGHT! コール中
-      - 'PLAYING': 通常戦闘中
-      - 'KO': ノックアウト終了
-      - 'FINISHED': 暗転・リザルト
+      - 'KO': ノックアウト終了（tpl_ko.png の検知、またはタイマー存在下でのHP0）
+      - 'TIMEOVER': タイムオーバー終了（time-over.png の検知）
+      - 'PLAYING': 戦闘中（必殺技演出による暗転・HPバー/タイマー消失中も含む）
     """
-    # 0. キャラセレクト画面（VERSUS MODE）の検出（戦闘がすべて終了したことの判定）
+    # 1. キャラセレクト画面（VERSUS MODE）の検出（ESC終了または全ラウンド終了）
     if _tpl_select is not None:
         res_s = cv2.matchTemplate(cv_img, _tpl_select, cv2.TM_CCOEFF_NORMED)
         if float(res_s.max()) > 0.70:
             return "SELECT"
 
-    # 1. 画面全体の平均輝度（暗転チェック）
-    mean_val = np.mean(cv_img)
-    if mean_val < 30:
-        return "FINISHED"
+    # 2. KOチェック（tpl_ko.png の画像検知）
+    if _tpl_ko is not None:
+        res_k = cv2.matchTemplate(cv_img, _tpl_ko, cv2.TM_CCOEFF_NORMED)
+        if float(res_k.max()) > 0.65:
+            return "KO"
 
-    # 2. 戦闘中画面（IN_BATTLE）かどうかの判定
-    has_hp_bars = (p1_hp > 0 or p2_hp > 0)
+    # 3. タイムオーバーチェック（time-over.png の画像検知）
+    if _tpl_timeover is not None:
+        res_to = cv2.matchTemplate(cv_img, _tpl_timeover, cv2.TM_CCOEFF_NORMED)
+        if float(res_to.max()) > 0.65:
+            return "TIMEOVER"
+
+    # 4. タイマー検知（戦闘画面かつ演出中ではないことを確認）
     has_timer = False
-
     if _tpl_time is not None:
         h, w, _ = cv_img.shape
-        # タイマーは画面中央上部に存在
         timer_area = cv_img[int(h * 0.05):int(h * 0.25), int(w * 0.40):int(w * 0.60)]
         if timer_area.shape[0] >= _tpl_time.shape[0] and timer_area.shape[1] >= _tpl_time.shape[1]:
             res_t = cv2.matchTemplate(timer_area, _tpl_time, cv2.TM_CCOEFF_NORMED)
             if float(res_t.max()) > 0.55:
                 has_timer = True
 
-    # HPバーもタイマーも検出できない場合は、キャラセレクトやタイトル等の非戦闘画面！
-    if not has_hp_bars and not has_timer:
-        return "MENU"
+    # 5. タイマー表示中のHP0判定（KO表示が取得できなくてもHP0とタイマーがあればKO）
+    if has_timer and (p1_hp == 0 or p2_hp == 0):
+        return "KO"
 
-    # 3. FIGHT表示チェック
+    # 6. FIGHT表示チェック
     if _tpl_fight is not None:
         res_f = cv2.matchTemplate(cv_img, _tpl_fight, cv2.TM_CCOEFF_NORMED)
         if float(res_f.max()) > 0.65:
             return "FIGHT"
 
-    # 4. KO / タイムオーバーチェック（正規の戦闘画面内でのみ判定）
-    if (p1_hp == 0 or p2_hp == 0) and has_timer:
-        return "KO"
-
-    if _tpl_ko is not None:
-        res_k = cv2.matchTemplate(cv_img, _tpl_ko, cv2.TM_CCOEFF_NORMED)
-        if float(res_k.max()) > 0.65:
-            return "KO"
-
-    if _tpl_timeover is not None:
-        res_to = cv2.matchTemplate(cv_img, _tpl_timeover, cv2.TM_CCOEFF_NORMED)
-        if float(res_to.max()) > 0.65:
-            return "TIMEOVER"
-
+    # 上記以外（超必殺技のカットイン・暗転、HPバー一時消失など）はすべて戦闘中（PLAYING）として継続
     return "PLAYING"
 
 def find_mugen_window():
@@ -649,8 +639,8 @@ def capture_mugen_window() -> tuple[Image.Image, np.ndarray, str]:
         cv_img = cv2.imread("mugen_window.png")
         return pil_img, cv_img, "mugen_window.png (Fallback)"
 
-    dummy = Image.new("RGB", (646, 509), (0, 0, 0))
-    return dummy, np.zeros((509, 646, 3), dtype=np.uint8), "Black dummy"
+    # MUGENウィンドウが見つからない（アプリ終了）
+    return None, None, "CLOSED"
 
 # ==========================================
 # 5. メインループ
@@ -712,15 +702,29 @@ def main():
 
     while True:
         pil_img, cv_img, win_title = capture_mugen_window()
+
+        # パターン4: アプリそのものが何らかの理由で終了した場合
+        if pil_img is None or cv_img is None:
+            gamepad.reset()
+            gamepad.update()
+            if round_turns:
+                print(f"\n>>> ⚠️ MUGENウィンドウの終了を検知！第{round_num}ラウンドの戦術反省を保存して待機します <<<")
+                review_and_save_round(round_num, round_turns, last_valid_my_hp, last_valid_enemy_hp)
+                round_turns.clear()
+            if battle_state != "APP_CLOSED":
+                print("\n[MUGEN終了検知] MUGENアプリが終了しました。キー入力を停止し、再起動を待機します...")
+                battle_state = "APP_CLOSED"
+            time.sleep(1.0)
+            continue
+
         p1_hp, p2_hp = detect_hp_from_image(pil_img)
         p1_v, p2_v = detect_victory_marks(cv_img)
         status = check_game_status(cv_img, p1_hp, p2_hp)
 
-        # 0-a. キャラセレクト画面（VERSUS MODE）の検知 -> 戦闘が完全に終了したことを判定し入力停止
+        # パターン3: ESCキー終了や試合完了によりキャラセレクト画面（VERSUS MODE）に戻った場合
         if status == "SELECT":
             gamepad.reset()
             gamepad.update()
-            # 万が一最終ラウンドのKOを認識できずにセレクト画面へ戻った場合、未保存のラウンド反省を記録する
             if round_turns:
                 print(f"\n>>> 🏁 キャラセレクト画面（VERSUS MODE）への復帰を検知！第{round_num}ラウンドの戦術反省を保存します <<<")
                 review_and_save_round(round_num, round_turns, last_valid_my_hp, last_valid_enemy_hp)
@@ -732,18 +736,8 @@ def main():
             time.sleep(0.5)
             continue
 
-        # 0-b. その他のメニュー画面（タイトル・VS画面等）の検知・入力完全遮断
-        if status == "MENU":
-            gamepad.reset()
-            gamepad.update()
-            if battle_state != "MENU":
-                print("\n[待機中] タイトルまたは非戦闘画面を検知しました（キー入力停止中・対戦開始待機）...")
-                battle_state = "MENU"
-            time.sleep(0.5)
-            continue
-
-        # 1. セレクト・メニュー画面から対戦画面への復帰
-        if battle_state in ["WAITING_BATTLE", "MENU", "SELECT"]:
+        # セレクト・待機画面から対戦画面への復帰
+        if battle_state in ["WAITING_BATTLE", "MENU", "SELECT", "APP_CLOSED"]:
             print("\n>>> 🎮 対戦画面を検知しました！FIGHTコールを待機します <<<")
             battle_state = "WAITING_FIGHT"
             round_num = 1
@@ -753,7 +747,7 @@ def main():
             round_turns.clear()
             time.sleep(0.3)
 
-        # 2. FIGHT待ち
+        # FIGHT待ち
         if battle_state == "WAITING_FIGHT":
             if status == "FIGHT" or (p1_hp < 1000 or p2_hp < 1000):
                 print(">>> 💥 FIGHT! 戦闘開始を検知しました！行動を開始します！ <<<\n")
@@ -764,7 +758,7 @@ def main():
                 time.sleep(0.2)
                 continue
 
-        # 3. KO・ラウンド終了待機
+        # ラウンド終了待機から次ラウンド開始
         if battle_state == "ROUND_OVER":
             if status == "FIGHT" or (p1_hp == 1000 and p2_hp == 1000):
                 print(f">>> 🔄 第{round_num}ラウンドが開始されました！(Vマーク 自分:{p1_v} / 相手:{p2_v}) 前回の戦術方針を適用します <<<\n")
@@ -778,9 +772,9 @@ def main():
                 time.sleep(0.5)
                 continue
 
-        # 4. 戦闘中 -> KO / タイムオーバー検知 または 勝利マーク「V」増加検知
+        # パターン1 & 2: K.O. または Time Over（勝利マーク「V」増加を含む）によるラウンド終了検知
         v_increased = (p1_v > prev_p1_v) or (p2_v > prev_p2_v)
-        if status in ["KO", "TIMEOVER", "FINISHED"] or v_increased:
+        if status in ["KO", "TIMEOVER"] or v_increased:
             gamepad.reset()
             gamepad.update()
 
