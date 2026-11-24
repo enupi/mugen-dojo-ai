@@ -48,6 +48,7 @@ TPL_TIMEOVER_PATH = "time-over.png"
 TPL_TIME_PATH = "tpl_time.png"
 TPL_SELECT_PATH = "versus-mode_select.png"
 TPL_V_PATH = "tpl_v.png"
+TPL_IKAMUSUME_WIN_PATH = "ika-musume_win.png"
 IKAMUSUME_IMG_PATH = "ikamusume.png"
 
 # ==========================================
@@ -253,7 +254,7 @@ MODEL_NAME = "d1.2-ultra"
 if not LIQUID_API_KEY:
     print("⚠️ [警告] .env に LIQUID_API_KEY が設定されていません。")
 
-def review_and_save_round(round_num: int, round_turns: list, my_hp: int, enemy_hp: int, forced_winner: str = ""):
+def review_and_save_round(round_num: int, round_turns: list, my_hp: int, enemy_hp: int, forced_winner: str = "", last_cv_img: np.ndarray = None):
     """ラウンド終了時に戦況データをLiquid AI (d1.2-ultra)に分析させ、tactics.md に記録する"""
     if not round_turns:
         return
@@ -261,9 +262,11 @@ def review_and_save_round(round_num: int, round_turns: list, my_hp: int, enemy_h
     total_dealt = sum(t.get("damage_dealt", 0) for t in round_turns)
     total_taken = sum(t.get("damage_taken", 0) for t in round_turns)
 
-    # 勝敗判定（1. Vマーク確定勝敗 -> 2. 終了時HP比較 -> 3. 総与ダメ・被ダメ比較。引き分けは発生させない）
+    # 勝敗判定（1. 指定勝敗 -> 2. ika-musume_win.png 一致判定 -> 3. HP比較 -> 4. 与ダメ比較）
     if forced_winner:
         winner = forced_winner
+    elif last_cv_img is not None:
+        winner = "勝利（WIN）" if check_ikamusume_win(last_cv_img) else "敗北（LOSE）"
     elif my_hp > enemy_hp:
         winner = "勝利（WIN）"
     elif my_hp < enemy_hp:
@@ -480,6 +483,19 @@ _tpl_timeover = cv2.imread(TPL_TIMEOVER_PATH) if os.path.exists(TPL_TIMEOVER_PAT
 _tpl_time = cv2.imread(TPL_TIME_PATH) if os.path.exists(TPL_TIME_PATH) else None
 _tpl_select = cv2.imread(TPL_SELECT_PATH) if os.path.exists(TPL_SELECT_PATH) else None
 _tpl_v = cv2.imread(TPL_V_PATH) if os.path.exists(TPL_V_PATH) else None
+_tpl_ikamusume_win = cv2.imread(TPL_IKAMUSUME_WIN_PATH) if os.path.exists(TPL_IKAMUSUME_WIN_PATH) else None
+
+def check_ikamusume_win(cv_img: np.ndarray) -> bool:
+    """
+    ラウンド終了時に画面上にイカ娘の勝利表示 (ika-musume_win.png) が出ているかを判定する。
+    一致する場合は勝利（True）、一致しない場合は敗北（False）。
+    """
+    if _tpl_ikamusume_win is None:
+        return False
+    if cv_img.shape[0] < _tpl_ikamusume_win.shape[0] or cv_img.shape[1] < _tpl_ikamusume_win.shape[1]:
+        return False
+    res = cv2.matchTemplate(cv_img, _tpl_ikamusume_win, cv2.TM_CCOEFF_NORMED)
+    return float(res.max()) >= 0.65
 
 def detect_victory_marks(cv_img: np.ndarray) -> tuple[int, int]:
     """
@@ -763,21 +779,33 @@ def main():
             gamepad.reset()
             gamepad.update()
 
-            # Vマーク点灯の確定を少し待って再取得
+            # 勝利演出（IKA MUSUME WINS / Vマーク表示等）を確実に取得するため少し待機
+            time.sleep(0.5)
+            _, post_round_cv, _ = capture_mugen_window()
+
+            # ika-musume_win.png の判定（一致すれば勝利、一致しなければ敗北）
+            # 現在のフレームおよび直前フレームを照合
+            is_ika_win = check_ikamusume_win(post_round_cv) or check_ikamusume_win(cv_img)
+
+            # Vマークの更新確認
             if not v_increased:
-                time.sleep(0.4)
-                _, re_cv, _ = capture_mugen_window()
-                re_v1, re_v2 = detect_victory_marks(re_cv)
+                re_v1, re_v2 = detect_victory_marks(post_round_cv)
                 if re_v1 > prev_p1_v or re_v2 > prev_p2_v:
                     p1_v, p2_v = re_v1, re_v2
                     v_increased = True
 
-            # Vマークが増加していれば100%確実に勝敗を特定
-            forced_winner = ""
-            if p1_v > prev_p1_v and p2_v == prev_p2_v:
+            # 勝敗判定: ika-musume_win.png の一致を最優先
+            if is_ika_win:
+                forced_winner = "勝利（WIN）"
+            elif _tpl_ikamusume_win is not None:
+                # テンプレートが存在し、一致しなかった場合は敗北
+                forced_winner = "敗北（LOSE）"
+            elif p1_v > prev_p1_v and p2_v == prev_p2_v:
                 forced_winner = "勝利（WIN）"
             elif p2_v > prev_p2_v and p1_v == prev_p1_v:
                 forced_winner = "敗北（LOSE）"
+            else:
+                forced_winner = ""
 
             # 暗転時などでp1_hp==0かつp2_hp==0になっていた場合は直前の有効HPを使用
             eval_my_hp = p1_hp if (p1_hp > 0 or p2_hp > 0) else last_valid_my_hp
@@ -785,12 +813,12 @@ def main():
 
             reason_text = "タイムオーバー" if status == "TIMEOVER" else "K.O."
             print(
-                f">>> 🏆 第{round_num}ラウンド終了（{reason_text}）を検出！ "
+                f">>> 🏆 第{round_num}ラウンド終了（{reason_text}）を検出！ 判定: {forced_winner or '判定中'} "
                 f"(自分HP:{eval_my_hp}, 相手HP:{eval_enemy_hp} | Vマーク 自分:{p1_v}, 相手:{p2_v}) <<<"
             )
             print(">>> コマンド入力を停止し、戦術ノート（tactics.md）の反省・分析を行います...\n")
 
-            review_and_save_round(round_num, round_turns, eval_my_hp, eval_enemy_hp, forced_winner=forced_winner)
+            review_and_save_round(round_num, round_turns, eval_my_hp, eval_enemy_hp, forced_winner=forced_winner, last_cv_img=post_round_cv)
             round_num += 1
             round_turns.clear()
             history.clear()
