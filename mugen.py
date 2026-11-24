@@ -213,16 +213,20 @@ def append_tactics(round_num: int, winner: str, my_hp: int, enemy_hp: int, analy
         f.write(entry)
 
 def get_latest_tactics() -> str:
-    """tactics.md から直近の戦術方針を抽出する（プロンプト用）"""
+    """tactics.md から直近の有効な戦術方針を抽出する（無効・INVALIDマークされたラウンドはスキップ）"""
     if not os.path.exists(TACTICS_FILE):
         return "・状況に応じて間合いを意識して戦う"
     try:
         with open(TACTICS_FILE, "r", encoding="utf-8") as f:
             content = f.read()
         parts = content.split("## Round ")
-        if len(parts) > 1:
-            last_round = parts[-1]
-            lines = last_round.strip().splitlines()
+        # 末尾のラウンドから順に探索し、無効化されていない直近のラウンドを採用
+        for part in reversed(parts[1:]):
+            first_line = part.strip().splitlines()[0] if part.strip().splitlines() else ""
+            if any(tag in first_line for tag in ["[無効]", "[INVALID]", "[無効化]", "[キャンセル]"]):
+                continue
+
+            lines = part.strip().splitlines()
             # 「### 次ラウンドの戦術方針」以降の箇条書き行を抽出
             tactics_lines = []
             capture = False
@@ -236,7 +240,8 @@ def get_latest_tactics() -> str:
                     break
             if tactics_lines:
                 return "\n".join(tactics_lines[:3])
-            # なければ直近の行を返す
+
+            # 箇条書きが見つからない場合、一般的な行を返す
             valid_lines = [l.strip() for l in lines[1:] if l.strip() and not l.startswith("#") and not l.startswith("---")]
             if valid_lines:
                 return "\n".join(valid_lines[:3])
