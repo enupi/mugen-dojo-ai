@@ -44,6 +44,7 @@ TACTICS_FILE = "tactics.md"  # ラウンドごとの戦術メモ蓄積ファイ�
 DEBUG_IMG_PATH = "debug_hp_capture.png"
 TPL_FIGHT_PATH = "tpl_fight.png"
 TPL_KO_PATH = "tpl_ko.png"
+TPL_TIMEOVER_PATH = "time-over.png"
 TPL_TIME_PATH = "tpl_time.png"
 TPL_SELECT_PATH = "versus-mode_select.png"
 TPL_V_PATH = "tpl_v.png"
@@ -475,6 +476,7 @@ def detect_characters_and_distance(cv_img: np.ndarray, last_my_x: int, last_enem
 
 _tpl_fight = cv2.imread(TPL_FIGHT_PATH) if os.path.exists(TPL_FIGHT_PATH) else None
 _tpl_ko = cv2.imread(TPL_KO_PATH) if os.path.exists(TPL_KO_PATH) else None
+_tpl_timeover = cv2.imread(TPL_TIMEOVER_PATH) if os.path.exists(TPL_TIMEOVER_PATH) else None
 _tpl_time = cv2.imread(TPL_TIME_PATH) if os.path.exists(TPL_TIME_PATH) else None
 _tpl_select = cv2.imread(TPL_SELECT_PATH) if os.path.exists(TPL_SELECT_PATH) else None
 _tpl_v = cv2.imread(TPL_V_PATH) if os.path.exists(TPL_V_PATH) else None
@@ -557,7 +559,7 @@ def check_game_status(cv_img: np.ndarray, p1_hp: int, p2_hp: int) -> str:
         if float(res_f.max()) > 0.65:
             return "FIGHT"
 
-    # 4. KOチェック（正規の戦闘画面内でのみ判定）
+    # 4. KO / タイムオーバーチェック（正規の戦闘画面内でのみ判定）
     if (p1_hp == 0 or p2_hp == 0) and has_timer:
         return "KO"
 
@@ -565,6 +567,11 @@ def check_game_status(cv_img: np.ndarray, p1_hp: int, p2_hp: int) -> str:
         res_k = cv2.matchTemplate(cv_img, _tpl_ko, cv2.TM_CCOEFF_NORMED)
         if float(res_k.max()) > 0.65:
             return "KO"
+
+    if _tpl_timeover is not None:
+        res_to = cv2.matchTemplate(cv_img, _tpl_timeover, cv2.TM_CCOEFF_NORMED)
+        if float(res_to.max()) > 0.65:
+            return "TIMEOVER"
 
     return "PLAYING"
 
@@ -750,9 +757,9 @@ def main():
                 time.sleep(0.5)
                 continue
 
-        # 4. 戦闘中 -> KO検知 または 勝利マーク「V」増加検知
+        # 4. 戦闘中 -> KO / タイムオーバー検知 または 勝利マーク「V」増加検知
         v_increased = (p1_v > prev_p1_v) or (p2_v > prev_p2_v)
-        if status in ["KO", "FINISHED"] or v_increased:
+        if status in ["KO", "TIMEOVER", "FINISHED"] or v_increased:
             gamepad.reset()
             gamepad.update()
 
@@ -776,8 +783,9 @@ def main():
             eval_my_hp = p1_hp if (p1_hp > 0 or p2_hp > 0) else last_valid_my_hp
             eval_enemy_hp = p2_hp if (p1_hp > 0 or p2_hp > 0) else last_valid_enemy_hp
 
+            reason_text = "タイムオーバー" if status == "TIMEOVER" else "K.O."
             print(
-                f">>> 🏆 第{round_num}ラウンド終了を検出！ "
+                f">>> 🏆 第{round_num}ラウンド終了（{reason_text}）を検出！ "
                 f"(自分HP:{eval_my_hp}, 相手HP:{eval_enemy_hp} | Vマーク 自分:{p1_v}, 相手:{p2_v}) <<<"
             )
             print(">>> コマンド入力を停止し、戦術ノート（tactics.md）の反省・分析を行います...\n")
